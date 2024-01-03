@@ -25,7 +25,7 @@ patch_size: 3
 patch_similarity_threshold: 0.01
 
 no_mask_no_init_point: true
-no_mask_no_init_point_method: "ransac" # yolo, ransac
+no_mask_no_init_point_method: "yolo" # yolo, ransac
 yolo_checkpoint: ${hydra:runtime.cwd}/models/yolo_ckpts/yolov8x-seg.pt
 
 use_point_reinit: false

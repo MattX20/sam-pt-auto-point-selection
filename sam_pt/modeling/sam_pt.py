@@ -304,7 +304,7 @@ class SamPt(nn.Module):
             self.yolo_counter += 1
             
             for i, conf in enumerate([0.7, 0.6, 0.5, 0.4]):
-                yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_{self.yolo_counter}_",conf=0.7)
+                yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_{self.yolo_counter}_", conf=conf)
                 if yolo_results[0].masks is not None:
                     yolo_mask_object = yolo_results[0].masks.cpu()
                     yolo_mask_indx = np.vstack(yolo_mask_object.xy).astype(np.int32)
