@@ -12,10 +12,15 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 
+from ultralytics import YOLO
+from cv2 import fillPoly
+
 from sam_pt.point_tracker import PointTracker, SuperGluePointTracker
-from sam_pt.utils.query_points import extract_kmedoid_points, extract_random_mask_points, extract_corner_points, \
+from sam_pt.mask_query_points.query_points import extract_kmedoid_points, extract_random_mask_points, extract_corner_points, \
     extract_mixed_points
-from sam_pt.utils.util import PointVisibilityType
+from sam_pt.no_mask_no_init_point.point_initialization import random_point_initialization
+from sam_pt.no_mask_no_init_point.point_selection import ransac_point_selector
+from sam_pt.util import PointVisibilityType
 
 
 class SamPt(nn.Module):
@@ -41,6 +46,9 @@ class SamPt(nn.Module):
             use_patch_matching_filtering: bool,
             patch_size: int,
             patch_similarity_threshold: float,
+            no_mask_no_init_point: bool,
+            no_mask_no_init_point_method: str,
+            yolo_checkpoint: str,
             use_point_reinit: bool,
             reinit_point_tracker_horizon: int,
             reinit_horizon: int,
@@ -79,6 +87,10 @@ class SamPt(nn.Module):
             The similarity threshold value for patch matching. Above the threshold, points are marked as non-visible.
         use_point_reinit : bool
             If True, enables point reinitialization.
+        yolo_checkpoint : str
+            The path to the YOLO model checkpoint file. If this is not None, YOLO will be used for object detection.
+        use_ransac : bool
+            If True, RANSAC will be used for outlier detection in the point tracking. Cannot be True if yolo_checkpoint is not None.
         reinit_point_tracker_horizon : int
             The number of frames to run the point tracker for before performing reinitialization.
         reinit_horizon : int
@@ -110,6 +122,11 @@ class SamPt(nn.Module):
         self.patch_size = patch_size
         self.patch_similarity_threshold = patch_similarity_threshold
 
+        self.no_mask_no_init_point = no_mask_no_init_point
+        if no_mask_no_init_point:
+            self.no_mask_no_init_point_method = no_mask_no_init_point_method
+            self.yolo_checkpoint = yolo_checkpoint
+
         self.use_point_reinit = use_point_reinit
         self.reinit_point_tracker_horizon = reinit_point_tracker_horizon
         self.reinit_horizon = reinit_horizon
@@ -118,6 +135,11 @@ class SamPt(nn.Module):
     @property
     def device(self):
         return self._sam.device
+
+    def instanciate_yolo(self):
+        if self.no_mask_no_init_point and self.no_mask_no_init_point_method == "yolo":
+            self.yolo = YOLO(self.yolo_checkpoint)
+            self.yolo_counter = 0
 
     def forward(self, video):
         """
@@ -168,7 +190,11 @@ class SamPt(nn.Module):
         assert images[0].dtype == torch.uint8, "Input images must be in uint8 format (0-255)"
 
         # Prepare queries
-        if video.get("query_masks") is not None:  # E.g., when evaluating on the VOS task
+        if self.no_mask_no_init_point:
+            print(f"SAM-PT: Getting query points automatically, using {self.no_mask_no_init_point_method}")
+            query_points, query_masks = self.get_query_points(images, height, width)
+            query_scores = None
+        elif video.get("query_masks") is not None:  # E.g., when evaluating on the VOS task
             assert video.get("query_points") is None
             print("SAM-PT: Using query masks")
             query_masks = video["query_masks"].float()
@@ -234,6 +260,64 @@ class SamPt(nn.Module):
         }
 
         return results_dict
+
+    def get_query_points(self, images, height, width):
+
+        if self.no_mask_no_init_point_method=="ransac":
+            
+            n_points_per_mask = self.positive_points_per_mask + self.negative_points_per_mask
+
+            n_masks = 1 # for the moment, we only focus on one object
+            n_init_point_per_mask = 500
+            timesteps = [0.]
+
+            potential_query_points = random_point_initialization(n_masks, timesteps, n_init_point_per_mask, width, height)
+            print("Random point initialization")
+            trajectories, visibilities = self._track_points(images, potential_query_points)
+            print("Point trajectories computed")
+
+            p_query_points_positive, p_query_points_negative = ransac_point_selector(trajectories, visibilities)
+            print("Point classification foreground/background done")
+            """
+            random_positive_indicies = torch.randint(p_query_points_positive.shape[1], (self.positive_points_per_mask,))
+            random_negative_indicies = torch.randint(p_query_points_negative.shape[1], (self.negative_points_per_mask,))
+
+            query_points_positive = p_query_points_positive[:, random_positive_indicies, :].reshape(-1, self.positive_points_per_mask, 3)
+            query_points_negative = p_query_points_negative[:, random_negative_indicies, :].reshape(-1, self.negative_points_per_mask, 3)
+            """
+
+            def select_points(tensor, num_points):
+                """Select or duplicate points from the tensor to get exactly num_points."""
+                if tensor.shape[1] < num_points:
+                    # If there are not enough points, duplicate them
+                    repeats = (num_points + tensor.shape[1] - 1) // tensor.shape[1]  # Calculate how many times to repeat
+                    tensor = tensor.repeat(1, repeats, 1)  # Repeat the tensor
+                return tensor[:, :num_points, :]  # Select the first num_points
+
+            # Use the select_points function to get the desired number of points
+            query_points_positive = select_points(p_query_points_positive, self.positive_points_per_mask).reshape(-1, self.positive_points_per_mask, 3)
+            query_points_negative = select_points(p_query_points_negative, self.negative_points_per_mask).reshape(-1, self.negative_points_per_mask, 3)
+            query_points = torch.cat((query_points_positive, query_points_negative), dim=1)
+            query_masks = self.extract_query_masks(images, query_points)
+
+        elif self.no_mask_no_init_point_method == "yolo":
+            self.yolo_counter += 1
+            
+            for i, conf in enumerate([0.7, 0.6, 0.5, 0.4]):
+                yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_{self.yolo_counter}_",conf=0.7)
+                if yolo_results[0].masks is not None:
+                    yolo_mask_object = yolo_results[0].masks.cpu()
+                    yolo_mask_indx = np.vstack(yolo_mask_object.xy).astype(np.int32)
+                    break
+                elif i == 3:
+                    yolo_mask_indx = np.array([[0, 0], [height-1, 0], [0, (width-1)//2], [height-1, (width-1)//2]])
+            yolo_mask = np.zeros((height, width))
+            yolo_mask = fillPoly(yolo_mask, [yolo_mask_indx], color=1)
+            query_masks = torch.from_numpy(yolo_mask).float().unsqueeze(0)
+            query_points_timestep = torch.zeros((1,))
+            query_points = self.extract_query_points(images, query_masks, query_points_timestep)
+
+        return query_points, query_masks
 
     def extract_query_points(self, images, query_masks, query_points_timestep):
         """

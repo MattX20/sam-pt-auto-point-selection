@@ -10,7 +10,7 @@ evaluator:
 dataset: D17 # D16/D17/Y18/Y19/LV1/LV3/MOSE/BDD100K/G
 split: val # val/test
 simulate_interactive_point_correction: false
-masks_batch_size: 100
+masks_batch_size: 256
 seed: 72
 
 d16_path: ${hydra:runtime.cwd}/data/DAVIS/2016

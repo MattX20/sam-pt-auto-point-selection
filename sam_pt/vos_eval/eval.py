@@ -20,8 +20,8 @@ from tqdm import tqdm
 from sam_pt.modeling.sam_pt import SamPt
 from sam_pt.modeling.sam_pt_interactive import SamPtInteractive
 from sam_pt.point_tracker.cotracker import CoTrackerPointTracker
-from sam_pt.utils.query_points import extract_kmedoid_points
-from sam_pt.utils.util import visualize_predictions, seed_all
+from sam_pt.mask_query_points.query_points import extract_kmedoid_points
+from sam_pt.util import visualize_predictions, seed_all
 from sam_pt.vos_eval.bdd100keval import BDD100KEvaluator
 from sam_pt.vos_eval.data.mask_mapper import MaskMapper
 from sam_pt.vos_eval.data.test_datasets import LongTestDataset, DAVISTestDataset, YouTubeVOSTestDataset, \
@@ -137,6 +137,8 @@ def evaluate(cfg):
     # Load our checkpoint
     model = instantiate(cfg.model)
     model = model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+    model.instanciate_yolo()
+
     # If CoTracker is used, the seed needs to be set again since building the model changed the seed
     if isinstance(model, SamPt) and isinstance(model.point_tracker, CoTrackerPointTracker):
         print('CoTracker is used, setting seed again.')
@@ -480,7 +482,7 @@ def evaluate(cfg):
     print(f'Done. Find the results in {os.path.abspath(cfg.output)}')
 
 
-@hydra.main(config_path="../../configs", config_name="vos_eval_root", version_base="1.1")
+@hydra.main(config_path="../../configs", config_name="vos_eval_test", version_base="1.1")
 def main(cfg: DictConfig) -> None:
     evaluate(cfg)
 
