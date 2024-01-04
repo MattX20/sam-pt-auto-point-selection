@@ -54,7 +54,9 @@ def ransac_point_selector(trajectories, visibilities):
 
     outliers = X[~inlier_mask]
 
-    assert outliers.shape[0] > 0, "no foreground detected"
+    if outliers.shape[0] == 0 :
+        print("No foreground detected, random.")
+        outliers = X[inlier_mask].copy()
 
     negative_points = torch.from_numpy(outliers).to(trajectories.dtype)
     negative_points = torch.cat((torch.zeros(negative_points.shape[0], 1), negative_points), dim=1).reshape(1, -1, 3)
@@ -62,7 +64,7 @@ def ransac_point_selector(trajectories, visibilities):
     positive_points = torch.from_numpy(inliers).to(trajectories.dtype)
     positive_points = torch.cat((torch.zeros(positive_points.shape[0], 1), positive_points), dim=1).reshape(1, -1, 3)
 
-    H = torch.from_numpy(estimated_transform).float()
-    sorted_positive_points, sorted_negative_points = transform_and_sort_points(positive_points, H), transform_and_sort_points(negative_points, H) 
+    #H = torch.from_numpy(estimated_transform).float()
+    #sorted_positive_points, sorted_negative_points = transform_and_sort_points(positive_points, H), transform_and_sort_points(negative_points, H) 
 
     return positive_points, negative_points

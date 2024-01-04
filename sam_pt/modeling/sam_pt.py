@@ -268,7 +268,7 @@ class SamPt(nn.Module):
             n_points_per_mask = self.positive_points_per_mask + self.negative_points_per_mask
 
             n_masks = 1 # for the moment, we only focus on one object
-            n_init_point_per_mask = 500
+            n_init_point_per_mask = 1000
             timesteps = [0.]
 
             potential_query_points = random_point_initialization(n_masks, timesteps, n_init_point_per_mask, width, height)
@@ -276,14 +276,14 @@ class SamPt(nn.Module):
             trajectories, visibilities = self._track_points(images, potential_query_points)
             print("Point trajectories computed")
 
-            p_query_points_positive, p_query_points_negative = ransac_point_selector(trajectories, visibilities)
+            query_points_background, query_points_foreground = ransac_point_selector(trajectories, visibilities)
             print("Point classification foreground/background done")
             
-            random_positive_indicies = torch.randint(p_query_points_positive.shape[1], (self.positive_points_per_mask,))
-            random_negative_indicies = torch.randint(p_query_points_negative.shape[1], (self.negative_points_per_mask,))
+            random_positive_indicies = torch.randint(query_points_foreground.shape[1], (self.positive_points_per_mask,))
+            random_negative_indicies = torch.randint(query_points_background.shape[1], (self.negative_points_per_mask,))
 
-            query_points_positive = p_query_points_positive[:, random_positive_indicies, :].reshape(-1, self.positive_points_per_mask, 3)
-            query_points_negative = p_query_points_negative[:, random_negative_indicies, :].reshape(-1, self.negative_points_per_mask, 3)
+            query_points_positive = query_points_foreground[:, random_positive_indicies, :].reshape(-1, self.positive_points_per_mask, 3)
+            query_points_negative = query_points_background[:, random_negative_indicies, :].reshape(-1, self.negative_points_per_mask, 3)
             
             """
             def select_points(tensor, num_points):
