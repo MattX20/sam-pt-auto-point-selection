@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from ultralytics import YOLO
-from cv2 import fillPoly
+from cv2 import resize
 
 from sam_pt.point_tracker import PointTracker, SuperGluePointTracker
 from sam_pt.mask_query_points.query_points import extract_kmedoid_points, extract_random_mask_points, extract_corner_points, \
@@ -278,25 +278,25 @@ class SamPt(nn.Module):
 
             p_query_points_positive, p_query_points_negative = ransac_point_selector(trajectories, visibilities)
             print("Point classification foreground/background done")
-            """
+            
             random_positive_indicies = torch.randint(p_query_points_positive.shape[1], (self.positive_points_per_mask,))
             random_negative_indicies = torch.randint(p_query_points_negative.shape[1], (self.negative_points_per_mask,))
 
             query_points_positive = p_query_points_positive[:, random_positive_indicies, :].reshape(-1, self.positive_points_per_mask, 3)
             query_points_negative = p_query_points_negative[:, random_negative_indicies, :].reshape(-1, self.negative_points_per_mask, 3)
+            
             """
-
             def select_points(tensor, num_points):
-                """Select or duplicate points from the tensor to get exactly num_points."""
                 if tensor.shape[1] < num_points:
-                    # If there are not enough points, duplicate them
-                    repeats = (num_points + tensor.shape[1] - 1) // tensor.shape[1]  # Calculate how many times to repeat
+                    repeats = (num_points + tensor.shape[1] - 1) // tensor.shape[1]
                     tensor = tensor.repeat(1, repeats, 1)  # Repeat the tensor
                 return tensor[:, :num_points, :]  # Select the first num_points
 
             # Use the select_points function to get the desired number of points
             query_points_positive = select_points(p_query_points_positive, self.positive_points_per_mask).reshape(-1, self.positive_points_per_mask, 3)
             query_points_negative = select_points(p_query_points_negative, self.negative_points_per_mask).reshape(-1, self.negative_points_per_mask, 3)
+            """
+
             query_points = torch.cat((query_points_positive, query_points_negative), dim=1)
             query_masks = self.extract_query_masks(images, query_points)
 
@@ -306,15 +306,18 @@ class SamPt(nn.Module):
             for i, conf in enumerate([0.7, 0.6, 0.5, 0.4]):
                 yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_{self.yolo_counter}_", conf=conf)
                 if yolo_results[0].masks is not None:
-                    yolo_mask_object = yolo_results[0].masks.cpu()
-                    yolo_mask_indx = np.vstack(yolo_mask_object.xy).astype(np.int32)
+                    yolo_mask = yolo_results[0].masks.cpu().data.numpy().transpose(1, 2, 0)
+                    yolo_mask = resize(yolo_mask, (width, height))
+                    if len(yolo_mask.shape) == 2:
+                        yolo_mask = yolo_mask[:, :, np.newaxis]
+                    yolo_mask = yolo_mask.transpose(2, 0, 1)
                     break
-                elif i == 3:
-                    yolo_mask_indx = np.array([[0, 0], [height-1, 0], [0, (width-1)//2], [height-1, (width-1)//2]])
-            yolo_mask = np.zeros((height, width))
-            yolo_mask = fillPoly(yolo_mask, [yolo_mask_indx], color=1)
-            query_masks = torch.from_numpy(yolo_mask).float().unsqueeze(0)
-            query_points_timestep = torch.zeros((1,))
+                assert i < 3, "No object detected with yolo"
+
+            yolo_mask = np.max(yolo_mask, axis=0, keepdims=True) # mandatory if we want visualization to work
+            query_masks = torch.from_numpy(yolo_mask).float()
+            num_masks = query_masks.shape[0] # necessary, 1
+            query_points_timestep = torch.zeros((num_masks,))
             query_points = self.extract_query_points(images, query_masks, query_points_timestep)
 
         return query_points, query_masks
