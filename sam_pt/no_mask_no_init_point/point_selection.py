@@ -30,7 +30,7 @@ def ransac_point_selector(trajectories, visibilities):
     X = filtered_points_frame0.numpy()
     y = filtered_points_frame1.numpy()
 
-    estimated_affine_transform, inlier_mask = cv2.findHomography(X, y, cv2.RANSAC, 10)
+    estimated_transform, inlier_mask = cv2.findHomography(X, y, cv2.RANSAC, 10)
     
     inlier_mask = inlier_mask.ravel().astype(bool)
 
