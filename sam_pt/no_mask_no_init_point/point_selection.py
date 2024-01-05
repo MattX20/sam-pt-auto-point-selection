@@ -68,3 +68,41 @@ def ransac_point_selector(trajectories, visibilities):
     #sorted_positive_points, sorted_negative_points = transform_and_sort_points(positive_points, H), transform_and_sort_points(negative_points, H) 
 
     return positive_points, negative_points
+
+def yoloransac_point_selector(trajectories, visibilities, n_masks, n_points_per_mask):
+    step = 24
+
+    assert trajectories.shape[0] > step, "Insufficient frames for comparison."
+    assert trajectories.shape[1] == 1, "Function is designed for one mask only."
+
+    valid_points_mask = (visibilities[0, 0] == 1) & (visibilities[step, 0] == 1)
+    trajectories_first_two_frames = trajectories[[0, step], 0, :]
+
+    filtered_points_frame0 = trajectories_first_two_frames[0][valid_points_mask]
+    filtered_points_frame1 = trajectories_first_two_frames[1][valid_points_mask]
+
+    X = filtered_points_frame0.numpy()
+    y = filtered_points_frame1.numpy()
+
+    _, inlier_mask = cv2.findHomography(X, y, cv2.RANSAC, 20)
+    
+    inlier_mask = inlier_mask.ravel().astype(bool)
+    outlier_mask = ~inlier_mask
+    
+    foreground_masks = []
+    s = 0
+
+    for i in range(n_masks):
+        len_visible_points_mask_i = torch.sum(valid_points_mask[i*n_points_per_mask:(i+1)*n_points_per_mask])
+        
+        if len_visible_points_mask_i == 0:
+            continue
+
+        proportion_foreground = np.mean(outlier_mask[s:s+len_visible_points_mask_i])
+        
+        if proportion_foreground >= 0.5:
+            foreground_masks.append(i)
+        
+        s += len_visible_points_mask_i
+
+    return foreground_masks
