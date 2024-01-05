@@ -19,7 +19,7 @@ from sam_pt.point_tracker import PointTracker, SuperGluePointTracker
 from sam_pt.mask_query_points.query_points import extract_kmedoid_points, extract_random_mask_points, extract_corner_points, \
     extract_mixed_points
 from sam_pt.no_mask_no_init_point.point_initialization import random_point_initialization
-from sam_pt.no_mask_no_init_point.point_selection import ransac_point_selector
+from sam_pt.no_mask_no_init_point.point_selection import ransac_point_selector, yoloransac_point_selector
 from sam_pt.util import PointVisibilityType
 
 
@@ -137,7 +137,7 @@ class SamPt(nn.Module):
         return self._sam.device
 
     def instanciate_yolo(self):
-        if self.no_mask_no_init_point and self.no_mask_no_init_point_method == "yolo":
+        if self.no_mask_no_init_point and self.no_mask_no_init_point_method in ["yolo", "yoloransac"]:
             self.yolo = YOLO(self.yolo_checkpoint)
             self.yolo_counter = 0
 
@@ -284,18 +284,6 @@ class SamPt(nn.Module):
 
             query_points_positive = query_points_foreground[:, random_positive_indicies, :].reshape(-1, self.positive_points_per_mask, 3)
             query_points_negative = query_points_background[:, random_negative_indicies, :].reshape(-1, self.negative_points_per_mask, 3)
-            
-            """
-            def select_points(tensor, num_points):
-                if tensor.shape[1] < num_points:
-                    repeats = (num_points + tensor.shape[1] - 1) // tensor.shape[1]
-                    tensor = tensor.repeat(1, repeats, 1)  # Repeat the tensor
-                return tensor[:, :num_points, :]  # Select the first num_points
-
-            # Use the select_points function to get the desired number of points
-            query_points_positive = select_points(p_query_points_positive, self.positive_points_per_mask).reshape(-1, self.positive_points_per_mask, 3)
-            query_points_negative = select_points(p_query_points_negative, self.negative_points_per_mask).reshape(-1, self.negative_points_per_mask, 3)
-            """
 
             query_points = torch.cat((query_points_positive, query_points_negative), dim=1)
             query_masks = self.extract_query_masks(images, query_points)
@@ -304,7 +292,7 @@ class SamPt(nn.Module):
             self.yolo_counter += 1
             
             for i, conf in enumerate([0.7, 0.6, 0.5, 0.4]):
-                yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_{self.yolo_counter}_", conf=conf)
+                yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_yolo_{self.yolo_counter}_", conf=conf)
                 if yolo_results[0].masks is not None:
                     yolo_mask = yolo_results[0].masks.cpu().data.numpy().transpose(1, 2, 0)
                     yolo_mask = resize(yolo_mask, (width, height))
@@ -319,6 +307,56 @@ class SamPt(nn.Module):
             num_masks = query_masks.shape[0] # necessary, 1
             query_points_timestep = torch.zeros((num_masks,))
             query_points = self.extract_query_points(images, query_masks, query_points_timestep)
+        
+        elif self.no_mask_no_init_point_method == "yoloransac":
+            self.yolo_counter += 1
+            yolo_results = self.yolo.predict(images[0:1].float() / 255, save=True, name=f"video_yoloransac_{self.yolo_counter}_", conf=0.25)
+
+            assert yolo_results[0].masks is not None, "No object detected with yolo"
+
+            yolo_masks = yolo_results[0].masks.cpu().data.numpy().transpose(1, 2, 0)
+            yolo_masks = resize(yolo_masks, (width, height))
+            if len(yolo_masks.shape) == 2:
+                yolo_masks = yolo_masks[:, :, np.newaxis]
+            yolo_masks = yolo_masks.transpose(2, 0, 1)
+
+            potential_foreground_masks = torch.from_numpy(yolo_masks).float()
+
+            num_masks = potential_foreground_masks.shape[0]
+            foreground_points_timestep = torch.zeros((num_masks,))
+
+            foreground_potential_points = SamPt._extract_query_points_xy(
+                images=images,
+                query_masks=potential_foreground_masks,
+                query_points_timestep=foreground_points_timestep,
+                point_selection_method=self.positive_point_selection_method,
+                points_per_mask=self.positive_points_per_mask,
+            )
+
+            foreground_potential_points = torch.stack(foreground_potential_points, dim=0)
+            foreground_points_timestep = foreground_points_timestep[:, None, None].repeat(1, foreground_potential_points.shape[1], 1)
+            foreground_potential_points = torch.concat([foreground_points_timestep, foreground_potential_points], dim=2)
+
+            random_points = random_point_initialization(1, [0.], 500, width, height)
+
+            to_be_tracked = torch.cat((foreground_potential_points.view(1, num_masks * self.positive_points_per_mask, 3), random_points), dim=1)
+
+            trajectories, visibilities = self._track_points(images, to_be_tracked)
+
+            valid_masks = yoloransac_point_selector(trajectories, visibilities, num_masks, self.positive_points_per_mask)
+
+            if len(valid_masks) == 0 :
+                print("nothing detected as foreground/background, taking the first mask")
+                valid_masks.append(0)
+            
+            query_masks = np.max(yolo_masks[valid_masks], axis=0, keepdims=True) # mandatory if we want visualization to work
+            query_masks = torch.from_numpy(query_masks).float()
+            num_masks = query_masks.shape[0] # necessary, 1
+            query_points_timestep = torch.zeros((num_masks,))
+            query_points = self.extract_query_points(images, query_masks, query_points_timestep)
+
+        else :
+            raise NotImplementedError(f"{self.no_mask_no_init_point_method} is not implemented")
 
         return query_points, query_masks
 
